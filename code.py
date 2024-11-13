@@ -19,24 +19,23 @@ import adafruit_ntp
 import adafruit_requests
 import asyncio
 
-async def getOpenWeather(run_once = False):
+async def get_open_weather() -> bool:
     """Get weather data including timezone"""
     global conditions
     global last_weather
     global temperature
     global timezone
     global weather_data
+    
     url = f"http://api.openweathermap.org/data/2.5/weather?q={location}&units={units}&appid={apikey}"
 
     while True:
-        try:      
+        try: 
             with requests.get(url) as response:
                 weather_data = response.json()
+            last_weather = time.time()
         except:
-            if run_once:
-                return False
-
-        last_weather = time.time()
+            pass
 
         conditions = weather_data['weather'][0]['main']
 
@@ -47,36 +46,27 @@ async def getOpenWeather(run_once = False):
 
         temperature = weather_data['main']['temp']
         timezone = weather_data['timezone']
-        if run_once:
-            break
         await asyncio.sleep(300)
 
-    return True
-
-async def GetNTPTime(run_once = False):
+async def get_ntp_time() -> bool:
     """Set time from NTP"""
     global last_ntp
     while True:
         try:
             ntp = adafruit_ntp.NTP(pool, server="pool.ntp.org", tz_offset=timezone/3600, cache_seconds=3600)
+            rtc.RTC().datetime = ntp.datetime
+            last_ntp = time.time()
         except:
-            if run_once:
-                return False
+            pass
         
-        rtc.RTC().datetime = ntp.datetime
-        last_ntp = time.time()
-        if run_once:
-            break
         await asyncio.sleep(86400) 
 
-    return True
-
-def getFormattedTime(epoch):
+def get_formatted_time(epoch: float) -> str:
     """Returns formatted time given an epoch"""
     tm = time.localtime(epoch)
     return f'{tm.tm_year}-{tm.tm_mon:02}-{tm.tm_mday:02} {tm.tm_hour:02}:{tm.tm_min:02}:{tm.tm_sec:02}'
 
-def getUptime(uptime):
+def get_uptime(uptime: float) -> str:
     """Compute uptime given number of seconds"""
     days = int(uptime / 86400)
     hours = int((uptime - (days * 86400)) / 3600)
@@ -84,16 +74,30 @@ def getUptime(uptime):
     seconds = int((uptime - (days * 86400) - (hours * 3600) - (minutes * 60)))
     return f'{days} days, {hours} hours, {minutes} minutes, {seconds} seconds'
 
-async def display():
+def display_time(show_colon: bool=True):
+    """Display the time"""
+    hour = (time.localtime().tm_hour + 11) % 12 + 1
+    minute = time.localtime().tm_min
+    matrix.clear_all()
+    if show_colon:
+        matrix.text("{:>2}".format(hour) + ":{:02d}".format(minute), 0, 0)
+    else:
+        matrix.text("{:>2}".format(hour) + " {:02d}".format(minute), 0, 0)  
+    matrix.show()
+
+async def update_display():
     """Cycle through time, temperature and conditions"""
     while True:
         # display time
-        hour = (time.localtime().tm_hour + 11) % 12 + 1
-        minute = time.localtime().tm_min
-        matrix.clear_all()
-        matrix.text("{:>2}".format(hour) + ":{:02d}".format(minute), 0, 0)
-        matrix.show()
-        await asyncio.sleep(3)
+
+        display_time()
+        await asyncio.sleep(1)
+        
+        display_time(False)
+        await asyncio.sleep(1)
+
+        display_time()
+        await asyncio.sleep(1)
 
         # display temperature
         matrix.clear_all()
@@ -111,12 +115,17 @@ async def handle_http_requests():
     """Run the web server"""
     while True:
         # Process any waiting requests
-        pool_result = server.poll()
+        server.poll()
         await asyncio.sleep(0)
 
 async def main():
     """Main entry point"""
-    await asyncio.gather(getOpenWeather(), GetNTPTime(), display(), handle_http_requests())
+
+    weather_task = asyncio.create_task(get_open_weather())
+    ntp_task = asyncio.create_task(get_ntp_time())
+    display_task = asyncio.create_task(update_display())
+    http_task = asyncio.create_task(handle_http_requests())
+    await asyncio.gather(weather_task, ntp_task, display_task, http_task)
 
 # setup
 program_uptime = time.monotonic()
@@ -142,10 +151,10 @@ apikey = os.getenv("APIKEY")
 pool = socketpool.SocketPool(wifi.radio)
 ssl_context = adafruit_connection_manager.get_radio_ssl_context(wifi.radio)
 requests = adafruit_requests.Session(pool, ssl_context)
-server = Server(pool, "/static", debug=True)
+server = Server(pool, debug=True)
 
 @server.route("/")
-def base(request: Request):
+def base(request: Request) -> Response:
     info = """
 <style>
 table {
@@ -171,36 +180,19 @@ tr:nth-child(even) {
     info += f'<tr><td>Channel:</td><td>{wifi.radio.ap_info.channel}</td></tr>'
     info += f'<tr><td>Power:</td><td>{wifi.radio.tx_power} dBm</td></tr>'
     info += f'<tr><td>RSSI:</td><td>{wifi.radio.ap_info.rssi} dBm</td></tr>'
-    info += f'<tr><td>Current time:</td><td>{getFormattedTime(time.time())}</td></tr>'
-    info += f'<tr><td>Last NTP:</td><td>{getFormattedTime(last_ntp)}</td></tr>'
-    info += f'<tr><td>System uptime:</td><td>{getUptime(time.monotonic())}</td></tr>'
-    info += f'<tr><td>Program uptime:</td><td>{getUptime(time.monotonic() - program_uptime)}</td></tr>'
+    info += f'<tr><td>Current time:</td><td>{get_formatted_time(time.time())}</td></tr>'
+    info += f'<tr><td>Last NTP:</td><td>{get_formatted_time(last_ntp)}</td></tr>'
+    info += f'<tr><td>System uptime:</td><td>{get_uptime(time.monotonic())}</td></tr>'
+    info += f'<tr><td>Program uptime:</td><td>{get_uptime(time.monotonic() - program_uptime)}</td></tr>'
     info += f'<tr><td>Heap alloc:</td><td>{round(gc.mem_alloc()/1024)} kb</td></tr>'
     info += f'<tr><td>Heap free:</td><td>{round(gc.mem_free()/1024)} kb</td></tr>'
     info += f'<tr><td>Location:</td><td>{location}</td></tr>'
-    info += f'<tr><td>Last OpenWeather:</td><td>{getFormattedTime(last_weather)}</td></tr>'
+    info += f'<tr><td>Last OpenWeather:</td><td>{get_formatted_time(last_weather)}</td></tr>'
     info += '<tr><td>OpenWeather data:</td><td>'
     info += str(weather_data)
     info += '</td></tr></table>'
-    return Response(request, info, content_type='text/html')
+    return Response(request, body=info, content_type='text/html')
 
 server.start(str(wifi.radio.ipv4_address))
-
-# get weather data including timezone
-if getOpenWeather(run_once=True) == False:
-    matrix.clear_all()
-    matrix.text('W error', 0, 1, font_name = "font3x8.bin")
-    matrix.show()
-    time.sleep(60)
-    import supervisor
-    supervisor.reload()
-
-if GetNTPTime(run_once=True) == False:
-    matrix.clear_all()
-    matrix.text('T error', 0, 0)
-    matrix.show()
-    time.sleep(60)
-    import supervisor
-    supervisor.reload() 
 
 asyncio.run(main())
